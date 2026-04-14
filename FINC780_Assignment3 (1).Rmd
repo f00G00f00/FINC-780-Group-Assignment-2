@@ -117,7 +117,7 @@ backtest_dvi <- function(ticker, begin, end, dvi_threshold = 0.5, prices_xts = N
   # Cumulative return (product of (1 + r_t) - 1)
   cum_return <- as.numeric(prod(1 + strategy_returns) - 1) * 100
 
-  # --- Risk Metrics ---
+  # Risk Metrics 
   # Annualized Sharpe Ratio (assuming ~252 trading days/year, risk-free rate = 0)
   sr_daily <- as.numeric(coredata(strategy_returns))
   sharpe_ratio <- (mean(sr_daily) / sd(sr_daily)) * sqrt(252)
