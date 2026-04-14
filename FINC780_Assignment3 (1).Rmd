@@ -337,6 +337,8 @@ If we were to take this further, we'd want to test this on a more "boring" or ra
 
 This backtest was a great exercise in seeing how a mathematically sound indicator (DVI) can still fail when applied to the wrong asset. We've built a solid engine here that handles data fetching, signal generation, and sensitivity analysis, but the data tells us to be very careful.
 
+Additionally, when considering real-world implementation, factors such as execution lag (signals applied on the next trading day) and high turnover from frequent position changes would further reduce the strategy’s profitability. These practical constraints highlight that backtested results may overstate achievable performance.
+
 The biggest lesson? Don't fall in love with the math. Even a strategy rooted in solid behavioral concepts like "overreaction" can get crushed if the "overreaction" lasts longer than your capital does. Moving forward, we'd suggest adding a stop-loss or a trend-filter to this code to prevent the kind of unlimited downside we saw with Tesla.
 
 # References
