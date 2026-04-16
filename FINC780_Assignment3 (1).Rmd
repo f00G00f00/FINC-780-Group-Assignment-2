@@ -1,6 +1,6 @@
 ---
-title: "FINC-780: Group Assignment 2 – Trading Rule Back Testing"
-author:
+title: "FINC-780: Group Assignment 3 – Trading Rule Back Testing"
+author: ""
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -16,31 +16,29 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 # Introduction
 
-In the world of quantitative trading, we often hear that "the trend is your friend," but many of the most profitable strategies actually bet on the opposite: that markets eventually overextend and must snap back to reality. This project explores algorithmic backtesting through the lens of the DV Intermediate Oscillator (DVI).
+In the world of quantitative trading, trend-following strategies have attracted practitioners for decades on the premise that price momentum contains predictive information about future returns. One of the best-known trend-following signals is the death cross, which occurs when a short-term moving average falls below a long-term moving average, commonly interpreted as a bearish signal indicating downward momentum. Its mirror counterpart, the golden cross, occurs when the short-term average rises above the long-term average, signaling bullish momentum. This project explores algorithmic backtesting through the lens of the death-cross and golden-cross trading signal.
 
-The goal here isn't just to see if a rule works, but to ask the "what if" questions. If we had treated Tesla (TSLA) as a mean-reverting asset over the last few years, would we have actually made money, or would we have been "steamrolled" by its momentum?
+The goal here isn't just to see if the rule works, but to ask the "what if" questions. If we had systematically followed the death-cross and golden-cross signal on Tesla (TSLA) over recent years, would we have captured its explosive trends, or would whipsaws and false signals have eroded our returns?
 
-## The DVI Indicator
+## The Death-Cross / Golden-Cross Signal
 
-The DVI (created by David Varadi) isn't your standard RSI or MACD. It's a bit more nuanced because it looks at both Magnitude (how far we've moved) and Stretch (how many days we've been heading in one direction). By combining these, it tries to find those "exhaustion points" where a stock has simply gone too far, too fast.
-
-These two sub-indicators are weighted (default 80 % magnitude, 20 % stretch) and rescaled to oscillate between 0 and 1. A reading below the threshold (default 0.5) suggests the market is oversold (favoring a long position), while a reading above the threshold suggests the market is overbought (favoring a short position).
+The signal is built from two simple moving averages (SMAs). A short-term SMA, which by convention uses a 50-day window, captures recent price momentum, while a long-term SMA, typically 200 days, represents the broader trend. When the 50-day SMA crosses above the 200-day SMA (a golden cross), the strategy enters a long position, betting that upward momentum will persist. When the 50-day SMA crosses below the 200-day SMA (a death cross), the strategy switches to a short position, anticipating continued downside. In this way, the trader always holds a directional position: long when the trend is up, short when the trend is down.
 
 ## Link to Behavioral Finance
 
-Why should this work? From a behavioral standpoint, we're essentially trading against human nature:
+Why should a moving-average crossover strategy capture real market returns? From a behavioral standpoint, the signal exploits several well-documented investor biases:
 
-**The Overreaction Gap:** Investors usually push good news too high and bad news too low. The DVI's magnitude component tries to quantify that "too high/too low" gap.
+**Trend Chasing and Herding:** Investors tend to pile into rising stocks and flee falling ones, creating self-reinforcing trends. The golden-cross signal effectively rides this herding behavior by entering long when momentum is confirmed.
 
-**Herding & FOMO:** When everyone jumps on a trend (herding), the "Stretch" component of the DVI starts red-lining. We're betting that the crowd will eventually run out of steam.
+**Underreaction to New Information:** Behavioral research shows that investors are often slow to incorporate new information into prices. Moving averages, by their very construction, detect this gradual price adjustment and signal trend changes only after sustained movement, precisely when underreaction has had time to accumulate.
 
-**Anchoring:** Many traders get stuck on old price targets. When a stock deviates significantly from its historical norm, the DVI signals that a reversion is likely because those old price "anchors" still exert a psychological pull.
+**Overreaction and Reversals:** When sentiment eventually swings too far, the death cross signals the beginning of a bearish reversal, capturing the period of corrective price action that follows collective overreaction. By systematically switching direction at these crossover points, the strategy attempts to stay aligned with the dominant behavioral regime.
+
+**Anchoring:** Traders and investors anchor to the moving averages themselves. The 50-day and 200-day SMAs are among the most widely watched technical levels, meaning that crossovers can become self-fulfilling prophecies as large numbers of market participants act on the same signal.
 
 # Setup and Libraries
 
 ```{r libraries}
-# load packages
-
 library(yfR)
 library(TTR)
 library(xts)
@@ -50,13 +48,12 @@ library(kableExtra)
 ```
 
 ```{r helper}
-# Download data via yfR and convert to xts (needed by TTR::DVI)
+# Download daily adjusted prices via yfR and convert to xts
 get_prices_xts <- function(ticker, first_date, last_date) {
-  df <- yf_get(tickers    = ticker,
+  df <- yf_get(tickers = ticker,
                first_date = first_date,
-               last_date  = last_date,
-               be_quiet   = TRUE)
-  # Build xts from adjusted closing prices
+               last_date = last_date,
+               be_quiet = TRUE)
   price_xts <- xts(df$price_adjusted, order.by = df$ref_date)
   colnames(price_xts) <- "Close"
   return(price_xts)
@@ -65,45 +62,52 @@ get_prices_xts <- function(ticker, first_date, last_date) {
 
 # Function 1: Base-Level Back Test
 
-We ran the first simulation on TSLA from 2020 through the end of 2024 using the standard 0.5 threshold.
+We run the first simulation on TSLA from January 2020 through the end of March 2026 using the standard 50-day and 200-day moving-average windows.
 
 ```{r function1}
-backtest_dvi <- function(ticker, begin, end, dvi_threshold = 0.5, prices_xts = NULL) {
+backtest_ma <- function(ticker, begin, end, short_ma = 50, long_ma = 200,
+                        prices_xts = NULL) {
 
-  # Download price data via yfR
+  begin_date <- as.Date(begin, format = "%Y%m%d")
+  end_date <- as.Date(end,   format = "%Y%m%d")
+
+  # Download with warm-up buffer, or use pre-loaded xts from Functions 2/3
   if (is.null(prices_xts)) {
-    close_prices <- get_prices_xts(ticker,
-                                   as.Date(begin, format = "%Y%m%d"),
-                                   as.Date(end,   format = "%Y%m%d"))
+    buffer_start <- begin_date - ceiling(long_ma * 1.5)
+    close_prices_full <- get_prices_xts(ticker, buffer_start, end_date)
   } else {
-    # Subset pre-loaded xts to the requested date range
-    close_prices <- prices_xts[paste0(as.Date(begin, format = "%Y%m%d"), "/",
-                                      as.Date(end,   format = "%Y%m%d"))]
+    close_prices_full <- prices_xts
   }
 
-  # Compute DVI indicator
-  dvi <- DVI(close_prices)
+  # Compute SMAs on full dataset so values are valid from begin_date
+  sma_short_full <- SMA(close_prices_full, n = short_ma)
+  sma_long_full <- SMA(close_prices_full, n = long_ma)
 
-  # Compute daily arithmetic returns: (P_t / P_{t-1}) - 1
+  # Subset to the requested test window after SMA computation
+  date_range_str <- paste0(begin_date, "/", end_date)
+  close_prices <- close_prices_full[date_range_str]
+  sma_short <- sma_short_full[date_range_str]
+  sma_long <- sma_long_full[date_range_str]
+
+  # Daily arithmetic returns: (P_t - P_{t-1}) / P_{t-1}
   daily_returns <- diff(close_prices) / lag(close_prices, 1)
   colnames(daily_returns) <- "returns"
 
-  # Align DVI and returns (remove leading NAs from both DVI warm-up and first return)
-  dvi_values <- dvi$dvi
-  combined <- merge(daily_returns, dvi_values)
-  combined <- na.omit(combined)
-  colnames(combined) <- c("returns", "dvi")
-
-  # Generate signal: +1 (long) when DVI < threshold, -1 (short) otherwise
-  # Use lagged DVI so signal is based on *previous* day's DVI (no look-ahead)
-  combined$signal <- ifelse(lag(combined$dvi, 1) < dvi_threshold, 1, -1)
+  # Align returns and SMAs, drop leading NA
+  combined <- merge(daily_returns, sma_short, sma_long)
+  colnames(combined) <- c("returns", "sma_short", "sma_long")
   combined <- na.omit(combined)
 
-  # Compute strategy returns
+  # Lagged signal avoids look-ahead bias: position at t uses SMAs from t-1
+  combined$signal <- ifelse(lag(combined$sma_short, 1) >= lag(combined$sma_long, 1),
+                            1, -1)
+  combined <- na.omit(combined)
+
+  # Strategy returns
   signal <- combined$signal
   strategy_returns <- combined$returns * signal
 
-  # Count long and short trades (a "trade" = a change in position direction)
+  # Count trades (each distinct directional position entered, including initial)
   positions <- as.numeric(coredata(signal))
   pos_changes <- c(positions[1], diff(positions))
   long_trades <- sum(pos_changes ==  2) + ifelse(positions[1] ==  1, 1, 0)
@@ -114,31 +118,20 @@ backtest_dvi <- function(ticker, begin, end, dvi_threshold = 0.5, prices_xts = N
   pct_long <- sum(positions ==  1) / n_days * 100
   pct_short <- sum(positions == -1) / n_days * 100
 
-  # Cumulative return (product of (1 + r_t) - 1)
+  # Cumulative return via geometric compounding
   cum_return <- as.numeric(prod(1 + strategy_returns) - 1) * 100
 
-  # Risk Metrics 
-  # Annualized Sharpe Ratio (assuming ~252 trading days/year, risk-free rate = 0)
-  sr_daily <- as.numeric(coredata(strategy_returns))
-  sharpe_ratio <- (mean(sr_daily) / sd(sr_daily)) * sqrt(252)
+  # Buy-and-hold benchmark over the same trading days
+  bh_return <- as.numeric(prod(1 + combined$returns) - 1) * 100
 
-  # Maximum Drawdown: largest peak-to-trough decline in cumulative equity curve
-  cum_equity  <- cumprod(1 + strategy_returns)
-  running_max <- cummax(cum_equity)
-  drawdowns   <- (cum_equity - running_max) / running_max
-  max_drawdown <- as.numeric(min(drawdowns)) * 100  # negative %
-
-  # Build summary data frame
   summary_df <- data.frame(
     Metric = c("Total Long Trades", "Total Short Trades",
                "Percent Time Long (%)", "Percent Time Short (%)",
-               "Cumulative Return (%)",
-               "Annualized Sharpe Ratio", "Maximum Drawdown (%)"),
+               "Cumulative Return (%)", "Buy-and-Hold Return (%)"),
     Value  = round(c(long_trades, short_trades, pct_long, pct_short,
-                     cum_return, sharpe_ratio, max_drawdown), 2)
+                     cum_return, bh_return), 2)
   )
 
-  # Also return numeric results for use in Functions 2 and 3
   results <- list(
     summary = summary_df,
     long_trades = long_trades,
@@ -146,8 +139,7 @@ backtest_dvi <- function(ticker, begin, end, dvi_threshold = 0.5, prices_xts = N
     pct_long = pct_long,
     pct_short = pct_short,
     cum_return = cum_return,
-    sharpe_ratio = sharpe_ratio,
-    max_drawdown = max_drawdown,
+    bh_return = bh_return,
     strategy_ret = strategy_returns
   )
 
@@ -155,73 +147,70 @@ backtest_dvi <- function(ticker, begin, end, dvi_threshold = 0.5, prices_xts = N
 }
 ```
 
-## Function 1 Results: TSLA, 2020-01-01 to 2024-12-31, DVI = 0.5
+## Function 1 Results: TSLA, 2020-01-01 to 2026-03-31, SMA(50, 200)
 
 ```{r f1_results}
-f1 <- backtest_dvi("TSLA", "20200101", "20241231", 0.5)
+f1 <- backtest_ma("TSLA", "20200101", "20260331", 50, 200)
 
-kable(f1$summary, caption = "DVI Back Test Summary for TSLA (2020–2024)",
+kable(f1$summary,
+      caption = "Death-Cross / Golden-Cross Back Test Summary for TSLA (2020–2026)",
       align = "lr") %>%
   kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
 ```
 
-**Interpretation:** The numbers are honestly a bit of a wake-up call. While the strategy was active — splitting time almost perfectly between long and short positions — the cumulative return was deeply negative. The Sharpe Ratio confirms this: a negative value tells us the strategy's returns didn't compensate for the risk taken. The Maximum Drawdown shows just how painful the ride was — at its worst point, the strategy's equity curve fell dramatically from its peak.
+**Interpretation:** The strategy produces a cumulative return of `r round(f1$cum_return, 2)`% over the six-year window, spending `r round(f1$pct_long, 1)`% of the time long and `r round(f1$pct_short, 1)`% short across `r f1$long_trades` long and `r f1$short_trades` short trades. For comparison, a simple buy-and-hold position in TSLA over the same period would have returned `r round(f1$bh_return, 2)`%, making the strategy's underperformance starkly visible. The 200-day SMA is, by construction, a lagging indicator: it takes sustained price movement over many months before the long average shifts enough to trigger a crossover. In Tesla's case, this lag proved damaging during the stock's most violent recoveries. After the COVID crash of early 2020, TSLA surged from its trough;  but the death cross triggered by the initial sell-off kept the strategy short for much of that rally, compounding losses as the short position worked directly against the price appreciation. A similar dynamic played out during the 2023 recovery after the 2022 drawdown. Each day the strategy remained short on a rising stock, it generated a return equal to the negative of that day's gain. These extended periods of "short during a bull run" account for the gap between the strategy and the buy-and-hold benchmark. The trade count reflects how many full crossover events occurred — each one representing a complete directional reversal that would also incur transaction costs in practice, further eroding returns.
 
-This highlights a massive risk in rule-based trading: systematic momentum. During the period where Tesla was becoming a global powerhouse, a mean-reversion strategy like the DVI was essentially trying to "short the future." Every time the DVI said Tesla was "overbought," the stock just kept climbing. Note that this analysis does not account for transaction costs (slippage or commissions); with roughly 78 trades over 4 years, those costs would make the actual return even lower.
+# Function 2: Simulate Multiple Back-Test Periods
 
-# Function 2: Simulate Multiple Back Test Periods
-
-It's easy to get a "lucky" or "unlucky" result by picking one specific five-year window. To see if the DVI is actually robust, we broke the 2018–2024 period into rolling 3-year windows.
+It's easy to get a "lucky" or "unlucky" result by picking one specific window. To assess whether the death-cross signal is robust, we break the 2018–2026 period into rolling 3-year sub-periods. Each sub-period spans exactly three calendar years (e.g., 2018–2020, 2019–2021, ..., 2024–2026). To ensure valid SMA values from the first day of each sub-period, the initial data download includes a one-year buffer before the overall start year.
 
 ```{r function2}
-backtest_multi_period <- function(ticker, test_years, date_range, dvi_threshold = 0.5) {
+backtest_multi_period <- function(ticker, test_years, date_range,
+                                  short_ma = 50, long_ma = 200) {
 
   start_year <- as.numeric(date_range[1])
   end_year <- as.numeric(date_range[2])
 
-  # Download full date range once to avoid repeated API calls
+  # Download with one-year buffer for SMA warm-up
+  buffer_start <- as.Date(paste0(start_year - 1, "-01-01"))
   all_prices <- get_prices_xts(ticker,
-                               as.Date(paste0(start_year, "-01-01")),
-                               as.Date(paste0(end_year, "-12-31")))
+                                 buffer_start,
+                                 as.Date(paste0(end_year, "-12-31")))
 
-  # Generate all possible start years for sub-periods of length test_years
+  # Roll test_years-year windows; last valid start = end_year - test_years + 1
   results_list <- list()
   period_labels <- c()
   cum_returns <- c()
 
-  for (yr in start_year:(end_year - test_years)) {
+  for (yr in start_year:(end_year - test_years + 1)) {
     begin <- paste0(yr, "0101")
-    end <- paste0(yr + test_years, "1231")
-    label <- paste0(yr, "-", yr + test_years)
+    end <- paste0(yr + test_years - 1, "1231")
+    label <- paste0(yr, "-", yr + test_years - 1)
 
-    res <- backtest_dvi(ticker, begin, end, dvi_threshold, prices_xts = all_prices)
+    res <- backtest_ma(ticker, begin, end, short_ma, long_ma,
+                       prices_xts = all_prices)
 
     results_list[[label]] <- res
     period_labels <- c(period_labels, label)
-    cum_returns   <- c(cum_returns, res$cum_return)
+    cum_returns <- c(cum_returns, res$cum_return)
   }
 
   # Compute means across all iterations
-  mean_long_trades  <- mean(sapply(results_list, function(x) x$long_trades))
+  mean_long_trades <- mean(sapply(results_list, function(x) x$long_trades))
   mean_short_trades <- mean(sapply(results_list, function(x) x$short_trades))
-  mean_pct_long     <- mean(sapply(results_list, function(x) x$pct_long))
-  mean_pct_short    <- mean(sapply(results_list, function(x) x$pct_short))
-  mean_cum_return   <- mean(sapply(results_list, function(x) x$cum_return))
-  mean_sharpe       <- mean(sapply(results_list, function(x) x$sharpe_ratio))
-  mean_max_dd       <- mean(sapply(results_list, function(x) x$max_drawdown))
+  mean_pct_long <- mean(sapply(results_list, function(x) x$pct_long))
+  mean_pct_short <- mean(sapply(results_list, function(x) x$pct_short))
+  mean_cum_return <- mean(sapply(results_list, function(x) x$cum_return))
 
-  # Summary table
   summary_df <- data.frame(
     Metric = c("Mean Long Trades", "Mean Short Trades",
                "Mean Percent Time Long (%)", "Mean Percent Time Short (%)",
-               "Mean Cumulative Return (%)",
-               "Mean Annualized Sharpe Ratio", "Mean Maximum Drawdown (%)"),
+               "Mean Cumulative Return (%)"),
     Value  = round(c(mean_long_trades, mean_short_trades,
-                     mean_pct_long, mean_pct_short, mean_cum_return,
-                     mean_sharpe, mean_max_dd), 2)
+                     mean_pct_long, mean_pct_short, mean_cum_return), 2)
   )
 
-  # Plot cumulative return by sub-period
+  # Bar chart of cumulative return by sub-period
   plot_df <- data.frame(Period = period_labels, Cumulative_Return = cum_returns)
   plot_df$Period <- factor(plot_df$Period, levels = period_labels)
 
@@ -230,7 +219,8 @@ backtest_multi_period <- function(ticker, test_years, date_range, dvi_threshold 
     geom_text(aes(label = paste0(round(Cumulative_Return, 1), "%")),
               vjust = -0.5, size = 3.5) +
     labs(title = paste("Cumulative Return by Sub-Period:", ticker),
-         subtitle = paste(test_years, "-Year Testing Windows"),
+         subtitle = paste(test_years, "-Year Testing Windows  |  SMA(",
+                          short_ma, ",", long_ma, ")", sep = ""),
          x = "Period", y = "Cumulative Return (%)") +
     theme_minimal() +
     theme(legend.position = "none",
@@ -240,10 +230,10 @@ backtest_multi_period <- function(ticker, test_years, date_range, dvi_threshold 
 }
 ```
 
-## Function 2 Results: TSLA, 3-Year Windows, 2018–2024, DVI = 0.5
+## Function 2 Results: TSLA, 3-Year Windows, 2018–2026, SMA(50, 200)
 
 ```{r f2_results, fig.width=8, fig.height=5}
-f2 <- backtest_multi_period("TSLA", 3, c("2018", "2024"), 0.5)
+f2 <- backtest_multi_period("TSLA", 3, c("2018", "2026"), 50, 200)
 
 kable(f2$summary,
       caption = "Mean Results Across 3-Year Sub-Periods for TSLA",
@@ -253,49 +243,56 @@ kable(f2$summary,
 print(f2$plot)
 ```
 
-**Interpretation:** The bar chart shows a clear story: the strategy didn't just fail once; it struggled consistently across different regimes. Even with 3-year windows, the mean cumulative return was deeply negative and the mean Sharpe Ratio negative across the board. This suggests that Tesla's volatility is "trending volatility" rather than "mean-reverting volatility." In short, the DVI was consistently on the wrong side of the move.
+**Interpretation:** The bar chart shows cumulative returns across seven rolling 3-year windows (2018–2020 through 2024–2026), each representing a distinct market regime in Tesla's history. The mean cumulative return of `r round(f2$summary$Value[5], 2)`% provides a single summary of average profitability across all windows. Considerable variation across sub-periods is the expected and informative result: windows that coincide with Tesla's explosive directional runs (upward or downward) may show large positive returns if the strategy happened to be on the correct side, while windows that include major V-shaped recoveries — where the 200-day SMA's lag forces the strategy to remain short through an aggressive rebound — are likely to show the worst losses. A strategy whose sign of profitability depends heavily on the specific three-year window tested is not reliably profitable; the mean return and the spread across windows together characterize whether the death-cross signal is a durable edge or a regime-specific artifact.
 
-# Function 3: Simulate Multiple DVI Thresholds
+# Function 3: Simulate Multiple Short Moving-Average Windows
 
-Finally, we wanted to see if the 0.5 threshold was just the wrong setting for a stock as aggressive as Tesla, so we ran a "sweep" of 60 different thresholds from 0.2 to 0.8.
+Finally, we want to see how sensitive the strategy is to the choice of the short moving-average window. Holding the long moving average fixed at 200 days, we vary the short window from 20 to 80 days in increments of 20.
 
 ```{r function3}
-backtest_multi_threshold <- function(ticker, begin, end, low_dvi, high_dvi, dvi_increment) {
+backtest_multi_short_ma <- function(ticker, begin, end, low_short, high_short,
+                                     ma_increment, long_ma = 200) {
 
-  # Download data once to avoid repeated API calls across thresholds
-  all_prices <- get_prices_xts(ticker,
-                               as.Date(begin, format = "%Y%m%d"),
-                               as.Date(end,   format = "%Y%m%d"))
+  begin_date <- as.Date(begin, format = "%Y%m%d")
+  end_date <- as.Date(end,   format = "%Y%m%d")
 
-  thresholds <- seq(low_dvi, high_dvi, by = dvi_increment)
-  long_trades <- numeric(length(thresholds))
-  short_trades <- numeric(length(thresholds))
-  cum_returns <- numeric(length(thresholds))
+  # Download once with warm-up buffer, reused across all short MA iterations
+  buffer_start <- begin_date - ceiling(long_ma * 1.5)
+  all_prices <- get_prices_xts(ticker, buffer_start, end_date)
 
-  for (i in seq_along(thresholds)) {
-    current_DVI <- thresholds[i]
-    res <- backtest_dvi(ticker, begin, end, current_DVI, prices_xts = all_prices)
+  short_windows <- seq(low_short, high_short, by = ma_increment)
+  long_trades <- numeric(length(short_windows))
+  short_trades <- numeric(length(short_windows))
+  cum_returns <- numeric(length(short_windows))
+
+  for (i in seq_along(short_windows)) {
+    current_short <- short_windows[i]
+    res <- backtest_ma(ticker, begin, end, current_short, long_ma,
+                       prices_xts = all_prices)
     long_trades[i] <- res$long_trades
     short_trades[i] <- res$short_trades
     cum_returns[i] <- res$cum_return
   }
 
-  # Build results table
   results_df <- data.frame(
-    DVI_Threshold = thresholds,
+    Short_MA_Window = short_windows,
     Long_Trades = long_trades,
     Short_Trades = short_trades,
     Cumulative_Return = round(cum_returns, 2)
   )
 
-  # Plot threshold vs cumulative return
-  p <- ggplot(results_df, aes(x = DVI_Threshold, y = Cumulative_Return)) +
+  # Line plot of cumulative return vs short MA window
+  p <- ggplot(results_df, aes(x = Short_MA_Window, y = Cumulative_Return)) +
     geom_line(color = "steelblue", linewidth = 1) +
-    geom_point(color = "steelblue", size = 1, alpha = 0.5) +
+    geom_point(color = "steelblue", size = 2.5) +
+    geom_text(aes(label = paste0(round(Cumulative_Return, 1), "%")),
+              vjust = -1, size = 3.2) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
-    labs(title = paste("Cumulative Return vs. DVI Threshold:", ticker),
-         subtitle = paste("Back Test Period:", begin, "to", end),
-         x = "DVI Threshold", y = "Cumulative Return (%)") +
+    labs(title = paste("Cumulative Return vs. Short MA Window:", ticker),
+         subtitle = paste("Long MA fixed at", long_ma,
+                          "days  |  Back Test:", begin, "to", end),
+         x = "Short Moving-Average Window (days)",
+         y = "Cumulative Return (%)") +
     theme_minimal() +
     theme(plot.title = element_text(face = "bold"))
 
@@ -303,48 +300,47 @@ backtest_multi_threshold <- function(ticker, begin, end, low_dvi, high_dvi, dvi_
 }
 ```
 
-## Function 3 Results: TSLA, 2020–2024, Thresholds 0.2 to 0.8
+## Function 3 Results: TSLA, 2020–2026, Short MA 20–80 (step 20), Long MA 200
 
 ```{r f3_results, fig.width=8, fig.height=5}
-f3 <- backtest_multi_threshold("TSLA", "20200101", "20241231", 0.2, 0.8, 0.01)
+f3 <- backtest_multi_short_ma("TSLA", "20200101", "20260331", 20, 80, 20, 200)
 
-# Show a sample of the table (every 5th row for readability)
-display_rows <- seq(1, nrow(f3$table), by = 5)
-kable(f3$table[display_rows, ],
-      caption = "Strategy Performance Across DVI Thresholds (every 5th shown)",
+kable(f3$table,
+      caption = "Strategy Performance Across Short MA Windows (Long MA = 200)",
       row.names = FALSE, align = "cccc") %>%
-  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
-  scroll_box(height = "400px")
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
 
 print(f3$plot)
 ```
 
-**Interpretation:** The table and plot above reveal how sensitive the DVI strategy is to the choice of threshold. A lower threshold means the portfolio spends more time short (requiring a stronger oversold signal to go long), while a higher threshold means it spends more time long. Looking at the plot, there isn't a "magic number" that saves this strategy. Even as we move the threshold, the returns stay deep in the red. This is actually a very important finding as it suggests the failure isn't due to a poorly tuned parameter, but rather a fundamental mismatch between a mean-reversion indicator and a high-growth momentum stock.
+**Interpretation:** The table and plot reveal how sensitive the death-cross / golden-cross strategy is to the choice of the short moving-average window. A shorter window (20 days) makes the strategy more reactive, generating more frequent crossover signals and therefore more total trades. While this increases the potential to capture short-lived trends, it also amplifies exposure to whipsaw losses — situations where the averages cross back and forth without establishing a durable trend, triggering a series of poorly-timed reversals. A longer short window (80 days) smooths out noise but introduces meaningful additional lag on top of the already-slow 200-day average, causing the strategy to enter and exit positions well after a genuine trend has developed. The trade count column illustrates this trade-off directly: shorter windows generate many more signals, while longer windows converge toward the minimal-signal behavior of the standard 50-day convention. If cumulative returns remain uniformly negative across all windows tested, it suggests that the underperformance is not a quirk of the 50-day parameter choice but a structural feature of applying a slow crossover strategy to Tesla's volatile price history.
 
 # Discussion
 
-After looking at the results from all three functions, a few things stand out.
+After examining the results from all three functions, several key findings emerge.
 
-**Function 1** proves that just because a strategy is "algorithmic" doesn't mean it's safe. The deeply negative cumulative return on one of the most liquid stocks in the world is a brutal result, and the negative Sharpe Ratio confirms the risk-adjusted picture is just as bad.
+**Function 1** provides the baseline result for the standard 50/200-day crossover on Tesla over a six-year window. The strategy's cumulative return of `r round(f1$cum_return, 2)`% compares poorly against a buy-and-hold return of `r round(f1$bh_return, 2)`% over the same period — a gap of `r round(f1$bh_return - f1$cum_return, 2)` percentage points. This is best understood not as a failure of the death-cross concept generally, but as an illustration of the strategy's specific vulnerability on high-volatility momentum stocks. The 200-day SMA's inherent lag — which is both its feature and its flaw — meant that the strategy frequently found itself short precisely during Tesla's most aggressive upward moves. Because the strategy is always in a directional position (never in cash), every day spent short on a rising stock compounds losses at the same rate the buy-and-hold investor was accumulating gains. Transaction costs are not included in this figure; each crossover represents a full position reversal that would incur bid-ask spreads and brokerage commissions in practice, reducing the reported cumulative return further.
 
-**Function 2 and Function 3** really drove home the point that this wasn't a fluke. The strategy is incredibly sensitive to the type of market it's in. In behavioral terms, "herding" in Tesla was so strong that the DVI's "stretch" signals were triggered way too early, over and over again.
+**Function 2** demonstrates the importance of not relying on a single time window. By rolling 3-year sub-periods across 2018–2026, we can assess whether the strategy performs consistently or is highly dependent on the specific market regime. Tesla's price history includes extreme momentum phases (the 2020 rally), extended drawdowns (2022), and range-bound consolidation, each of which presents different challenges for a trend-following signal. A strategy that earns positive returns in some periods and large negative returns in others is regime-dependent and not reliably profitable,  a critical consideration before deploying real capital.
 
-An interesting counterpoint: if we had *flipped* the signal — going long when DVI is high and short when it's low — we would effectively have a "trend-following" version of the same indicator. Given Tesla's strong momentum profile, such a reversal would likely have outperformed significantly over this period. This observation reinforces the idea that the DVI signal itself contains useful information; the question is whether you trade *with* or *against* it, and that depends entirely on the asset's regime.
+**Function 3** addresses parameter sensitivity. The choice of 50 days for the short moving average is a widely adopted convention, not an optimization. By sweeping across 20, 40, 60, and 80 days, we can assess whether the strategy's performance is robust to this design choice. If cumulative returns remain negative across the full range of short windows tested, it confirms that the result from Function 1 is not an artifact of the specific 50-day parameterization but a structural feature of the crossover approach on this asset.
 
-If we were to take this further, we'd want to test this on a more "boring" or range-bound asset, like a utility stock or a stable index, where mean reversion actually has a chance to play out.
+From a behavioral finance perspective, the death-cross and golden-cross signals are interesting precisely because they are so widely followed. When a large proportion of market participants watch the same 50-day and 200-day moving averages, crossover events can become self-fulfilling: a golden cross triggers buying, which pushes prices higher, which reinforces the signal. This herding dynamic is distinct from the signal capturing fundamental value — it captures a coordination mechanism among technical traders. This distinction matters for interpreting the results: a strategy that profits from investor behavior rather than economic fundamentals is inherently fragile, and its effectiveness depends on the continued participation of traders acting on the same indicators.
+
+On the question of economic meaningfulness: the strategy's cumulative return of `r round(f1$cum_return, 2)`% versus a buy-and-hold return of `r round(f1$bh_return, 2)`% represents deeply negative alpha. Accounting for turnover and execution lag would only worsen that figure. Each crossover involves a full position reversal, meaning slippage on both the close and the open. For a stock as liquid as Tesla, per-trade costs are modest, but they are always additive losses on top of an already-negative strategy return. Lagging execution — where the signal is confirmed only after the market close and the trade is executed at the following day's open — introduces additional gap risk that is not captured in this backtest.
 
 # Conclusion
 
-This backtest was a great exercise in seeing how a mathematically sound indicator (DVI) can still fail when applied to the wrong asset. We've built a solid engine here that handles data fetching, signal generation, and sensitivity analysis, but the data tells us to be very careful.
+This backtest demonstrates how a widely followed technical indicator, the 50/200-day moving-average crossover, performs when applied systematically to Tesla. The death-cross and golden-cross signals capture the essence of trend-following: ride momentum when it confirms, and reverse when the trend breaks. The three functions we built provide a complete analytical toolkit, examining a single base case, testing robustness across time periods, and assessing parameter sensitivity.
 
-Additionally, when considering real-world implementation, factors such as execution lag (signals applied on the next trading day) and high turnover from frequent position changes would further reduce the strategy’s profitability. These practical constraints highlight that backtested results may overstate achievable performance.
+The key takeaway is that the death-cross strategy fails on TSLA over this period not because trend-following is conceptually unsound, but because the 200-day SMA's lag is too slow for a stock that recovers violently and quickly from its drawdowns. The strategy's always-invested nature, it is never in cash — means that being on the wrong side of a major move is particularly costly. Moving forward, potential improvements could include adding a confirmation filter (requiring the crossover to persist for several days before acting), incorporating a cash or exit option during ambiguous regimes, using exponential rather than simple moving averages to reduce lag, or combining the crossover signal with volatility-based position sizing to limit downside during uncertain market conditions.
 
-The biggest lesson? Don't fall in love with the math. Even a strategy rooted in solid behavioral concepts like "overreaction" can get crushed if the "overreaction" lasts longer than your capital does. Moving forward, we'd suggest adding a stop-loss or a trend-filter to this code to prevent the kind of unlimited downside we saw with Tesla.
+Beyond the results themselves, this assignment reinforced several lessons about rigorous quantitative analysis. First, backtesting is deceptively easy to do incorrectly: subtle mistakes like computing moving averages only over the test window (rather than a buffered history) or failing to lag the signal can introduce look-ahead bias that makes a strategy appear far better than it truly is. Second, a single backtest window can be deeply misleading — the rolling sub-period analysis in Function 2 made clear that the same strategy can look like a winner or a loser depending entirely on which years are examined, which is a warning against cherry-picking results. Third, the buy-and-hold benchmark reframes the entire discussion: a strategy does not need to lose money to be a bad strategy; it only needs to underperform the passive alternative after accounting for its costs and risks. Finally, connecting the mechanics of the signal to behavioral finance concepts — anchoring, herding, underreaction — gave us a framework for thinking about *why* such rules might work in some environments and fail in others, rather than treating the backtest result as a black box. These lessons apply well beyond the death-cross signal to quantitative research more broadly.
 
 # References
 
-- Varadi, D. (2009). *The DVI Indicator*. CSS Analytics.
-- Foster, J. (2011). *How to Backtest a Strategy in R*. FOSS Trading Blog.
-- TTR: Technical Trading Rules. R Package. CRAN.
+- Murphy, J. J. (1999). *Technical Analysis of the Financial Markets*. New York Institute of Finance.
+- Brock, W., Lakonishok, J., & LeBaron, B. (1992). Simple Technical Trading Rules and the Stochastic Properties of Stock Returns. *Journal of Finance*, 47(5), 1731–1764.
 - Shiller, R. J. (2000). *Irrational Exuberance*. Princeton University Press.
 - De Bondt, W. F. M., & Thaler, R. (1985). Does the Stock Market Overreact? *Journal of Finance*, 40(3), 793–805.
+- TTR: Technical Trading Rules. R Package. CRAN.
